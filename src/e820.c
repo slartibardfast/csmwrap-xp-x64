@@ -267,8 +267,18 @@ e820_update_cmos(struct csmwrap_priv *priv)
             EFI_E820_ENTRY64 *e = &e820_map[i];
             uint64_t e_end = e->BaseAddr + e->Length;
             if (e->Type != EfiAcpiAddressRangeMemory &&
-                e->Type != EfiAcpiAddressRangeACPI)
-                continue;
+                e->Type != EfiAcpiAddressRangeACPI &&
+                e->Type != EfiAcpiAddressRangeNVS) {
+                /*
+                 * Conventional small reservations (the e820 BIOS area and
+                 * similar) sit inside otherwise usable memory and must not
+                 * truncate the reported extent. A large reserved region is a
+                 * real hole, such as the PCI window, and must stop the walk.
+                 */
+                if (e->Type != EfiAcpiAddressRangeReserved ||
+                    e->Length > 0x100000)
+                    continue;
+            }
             if (e_end > 0xFFFFFFFFULL)
                 continue;
             if (e->BaseAddr <= ram_end && e_end > ram_end) {
@@ -291,8 +301,13 @@ e820_update_cmos(struct csmwrap_priv *priv)
             EFI_E820_ENTRY64 *e = &e820_map[i];
             uint64_t e_end = e->BaseAddr + e->Length;
             if (e->Type != EfiAcpiAddressRangeMemory &&
-                e->Type != EfiAcpiAddressRangeACPI)
-                continue;
+                e->Type != EfiAcpiAddressRangeACPI &&
+                e->Type != EfiAcpiAddressRangeNVS) {
+                /* Same rule as the conventional-memory walk above. */
+                if (e->Type != EfiAcpiAddressRangeReserved ||
+                    e->Length > 0x100000)
+                    continue;
+            }
             if (e->BaseAddr <= high_ram_end && e_end > high_ram_end) {
                 high_ram_end = e_end;
                 progress = 1;
