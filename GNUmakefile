@@ -69,12 +69,25 @@ NASMFLAGS := -g
 LDFLAGS :=
 
 # User controllable version string.
-# BUILD_VERSION must not depend on which tags a clone happens to carry. The old
-# `git describe --tags --always` returns "3.1.2-26-g<sha>" when tags are present
-# and a bare "<sha>" when they are not, so the same commit produced a different
-# artifact depending on clone flags or on a shallow fetch. The commit alone
-# identifies the build; the release version is carried by the tag itself.
-BUILD_VERSION := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo "Unknown")
+# BUILD_VERSION must be a function of the source tree alone.
+#
+# It used to read `git describe --tags --always`, which made the artifact depend on
+# which tags a clone happened to carry: a clone with tags embedded
+# "3.1.2-26-g<sha>" and one without embedded a bare "<sha>", so the same commit
+# produced different bytes. Worse, the toolchain container cannot read git at all,
+# because a bare-store worktree's .git is a file pointing at a gitdir outside the
+# mounted source. host-lifecycle builds its --verify-build worktree the same way, so
+# git is unusable in every build the recipe has to be reproducible in.
+#
+# The version therefore comes from the committed BUILD_VERSION file. A missing file is
+# an error rather than a fallback, because a fallback that silently yields a
+# different string is exactly the defect this replaces. The pin identifies the
+# commit; this string identifies the release series.
+BUILD_VERSION_FILE := BUILD_VERSION
+ifeq ($(wildcard $(BUILD_VERSION_FILE)),)
+$(error $(BUILD_VERSION_FILE) is missing: the build version must come from the committed file)
+endif
+BUILD_VERSION := $(strip $(shell cat $(BUILD_VERSION_FILE)))
 
 # Check if CC is Clang.
 override CC_IS_CLANG := $(shell ! $(CC) --version 2>/dev/null | grep -q '^Target: '; echo $$?)
