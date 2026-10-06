@@ -69,7 +69,12 @@ NASMFLAGS := -g
 LDFLAGS :=
 
 # User controllable version string.
-BUILD_VERSION := $(shell git describe --tags --always 2>/dev/null || echo "Unknown")
+# BUILD_VERSION must not depend on which tags a clone happens to carry. The old
+# `git describe --tags --always` returns "3.1.2-26-g<sha>" when tags are present
+# and a bare "<sha>" when they are not, so the same commit produced a different
+# artifact depending on clone flags or on a shallow fetch. The commit alone
+# identifies the build; the release version is carried by the tag itself.
+BUILD_VERSION := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo "Unknown")
 
 # Check if CC is Clang.
 override CC_IS_CLANG := $(shell ! $(CC) --version 2>/dev/null | grep -q '^Target: '; echo $$?)
