@@ -7,6 +7,7 @@
  */
 
 #include <efi.h>
+#include "apic.h"
 #include <csmwrap.h>
 #include <config.h>
 #include <io.h>
@@ -398,6 +399,13 @@ static void acpi_fix_checksum(struct acpi_sdt_hdr *hdr)
 }
 
 /* Pointers to allocated patched tables */
+/*
+ * MADT Local APIC Timer entry (ACPI type 2, length 8). uACPI has no name for this
+ * entry type, and its own type 2 is the Interrupt Source Override, which this file
+ * also copies through, so the value is declared locally with that collision noted.
+ */
+#define ACPI_MADT_ENTRY_TYPE_LAPIC_TIMER_LOCAL 2
+
 static void *patched_madt = NULL;
 static void *patched_rsdt = NULL;
 static void *patched_xsdt = NULL;
@@ -435,12 +443,23 @@ static struct acpi_madt *create_patched_madt(int helper_apic_id)
     uint32_t orig_len = orig_madt->hdr.length;
     uint32_t bsp_id = get_bsp_apic_id();
 
+    /*
+     * The LAPIC timer bus clock, measured before this function was called, published
+     * through the MADT's Local APIC Timer entry. See apic_measure.c for why the guest
+     * needs it at all: this host's CPU has no CPUID 0x15 or 0x16, so without an
+     * override the OS assumes a legacy 100 MHz and programs a clock an order of
+     * magnitude off. Zero means the measurement produced nothing publishable.
+     */
+    uint32_t timer_hz = apic_measured_bus_hz();
+    uint16_t timer_units = timer_hz ? (uint16_t)(timer_hz / 100000) : 0;
+
     /* First pass: find entries to remove and calculate new size */
     uint8_t *entry = (uint8_t *)(orig_madt + 1);
     uint8_t *end = (uint8_t *)orig_madt + orig_len;
     uint32_t removed_bytes = 0;
     uint32_t removed_count = 0;
     bool found_helper = false;
+    bool has_timer_entry = false;
 
     while (entry < end) {
         uint8_t type = entry[0];
@@ -455,6 +474,8 @@ static struct acpi_madt *create_patched_madt(int helper_apic_id)
         } else if (type == ACPI_MADT_ENTRY_TYPE_LOCAL_X2APIC) {
             cpu_id = ((struct acpi_madt_x2apic *)entry)->id;
             is_cpu = true;
+        } else if (type == ACPI_MADT_ENTRY_TYPE_LAPIC_TIMER_LOCAL) {
+            has_timer_entry = true;
         }
 
         if (is_cpu) {
@@ -474,8 +495,19 @@ static struct acpi_madt *create_patched_madt(int helper_apic_id)
         return NULL;
     }
 
+    /*
+     * Add a Local APIC Timer entry when the firmware did not supply one. The entry is
+     * 8 bytes: type, length, timer id, three reserved bytes, flags, and a 16-bit
+     * override in units of 1e5 Hz. Growing the table here rather than only patching an
+     * existing entry is what makes the override reach a platform whose firmware omits
+     * the entry, which is this one.
+     */
+    uint32_t added_bytes = 0;
+    if (timer_units && !has_timer_entry)
+        added_bytes = 8;
+
     /* Allocate new MADT (must be < 4GB for legacy OS) */
-    uint32_t new_len = orig_len - removed_bytes;
+    uint32_t new_len = orig_len - removed_bytes + added_bytes;
     EFI_PHYSICAL_ADDRESS new_madt_addr = 0xFFFFFFFF;
     EFI_STATUS status = gBS->AllocatePages(
         AllocateMaxAddress,
@@ -516,9 +548,35 @@ static struct acpi_madt *create_patched_madt(int helper_apic_id)
 
         if (!skip) {
             memcpy(dst, entry, len);
+            /*
+             * Fill in the timer override on an entry the firmware already provided,
+             * rather than adding a second one. Overriding in place keeps the table's
+             * entry order as the firmware set it.
+             */
+            if (type == ACPI_MADT_ENTRY_TYPE_LAPIC_TIMER_LOCAL && timer_units
+                && len >= 8) {
+                uint16_t *override_field = (uint16_t *)(dst + 6);
+                printf("  MADT LAPIC Timer override: %u -> %u (1e5 Hz units)\n",
+                       *override_field, timer_units);
+                *override_field = timer_units;
+            }
             dst += len;
         }
         entry += len;
+    }
+
+    /* No timer entry existed, so append one carrying the measured clock. */
+    if (added_bytes) {
+        uint8_t *t = dst;
+        t[0] = ACPI_MADT_ENTRY_TYPE_LAPIC_TIMER_LOCAL;
+        t[1] = 8;
+        t[2] = 0;                            /* timer id, always zero on PC */
+        t[3] = t[4] = t[5] = 0;              /* reserved */
+        t[6] = 0;                            /* flags: applies to all processors */
+        *(uint16_t *)(t + 6 + 2) = timer_units;
+        dst += 8;
+        printf("  added a MADT LAPIC Timer entry with override %u (1e5 Hz units)\n",
+               timer_units);
     }
 
     /* Update header */

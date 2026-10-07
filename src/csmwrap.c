@@ -706,6 +706,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     /* Calculate RSDP copy location for MADT patching */
     void *rsdp_copy = priv.csm_bin + (priv.csm_efi_table->AcpiRsdPtrPointer - priv.csm_bin_base);
 
+    /*
+     * Sample the LAPIC timer before the MADT is built. The MADT's Local APIC Timer
+     * entry can carry the bus frequency, which is the only way to tell this guest's
+     * OS anything CPUID cannot: the host CPU has no CPUID 0x15 or 0x16, so without
+     * an override the OS has no idea what the timer's clock is.
+     */
+    printf("Measuring the LAPIC timer before publishing the MADT...\n");
+    apic_measure_timer();
+
     /* Initialize BIOS proxy (find mailbox and helper entry in CSM binary) */
     if (bios_proxy_init(Csm16_bin, sizeof(Csm16_bin), rsdp_copy) != 0) {
         panic("BIOS proxy initialization failed\n");

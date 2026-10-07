@@ -16,12 +16,13 @@
 #include <io.h>
 #include <printf.h>
 
+#include "apic.h"
+
 #include <uacpi/acpi.h>
 #include <uacpi/tables.h>
 #include <uacpi/uacpi.h>
 
 /* MSR addresses */
-#define MSR_IA32_APIC_BASE              0x1B
 #define MSR_IA32_ARCH_CAPABILITIES      0x10A
 #define MSR_IA32_XAPIC_DISABLE_STATUS   0xBD
 
@@ -29,7 +30,6 @@
 #define APIC_BASE_BSP                   (1ULL << 8)   /* Bootstrap processor */
 #define APIC_BASE_EXTD                  (1ULL << 10)  /* x2APIC mode enable */
 #define APIC_BASE_EN                    (1ULL << 11)  /* APIC global enable */
-#define APIC_BASE_ADDR_MASK             0xFFFFFFFFFFFFF000ULL
 
 /* IA32_ARCH_CAPABILITIES bits */
 #define ARCH_CAP_XAPIC_DISABLE          (1ULL << 21)  /* IA32_XAPIC_DISABLE_STATUS exists */
