@@ -190,14 +190,12 @@ static void x2apic_configure_for_legacy(void)
     /* Clear task priority to allow all interrupts */
     wrmsr(X2APIC_MSR_TPR, 0);
 
-    /* Mask stale LVT entries to prevent unexpected interrupts.
-     * Only mask entries with Fixed, Lowest Priority, NMI, or ExtINT delivery
-     * mode. Leave SMI, INIT, and reserved delivery modes untouched as firmware
-     * may rely on them (e.g. thermal management via SMI). */
+    /* Mask stale LVT entries to prevent unexpected interrupts. The LAPIC timer is
+     * excluded, for the reason given in xapic_configure_for_legacy. */
     uint64_t lvt;
     lvt = rdmsr(X2APIC_MSR_LVT_TIMER);
-    if (lvt_should_mask(lvt))
-        wrmsr(X2APIC_MSR_LVT_TIMER, lvt | LVT_MASK);
+    printf("  x2APIC LVT_TIMER left as 0x%016lx (masked=%d): the legacy OS "
+           "reprograms it\n", lvt, !!(lvt & LVT_MASK));
     lvt = rdmsr(X2APIC_MSR_LVT_ERROR);
     if (lvt_should_mask(lvt))
         wrmsr(X2APIC_MSR_LVT_ERROR, lvt | LVT_MASK);
@@ -268,11 +266,27 @@ static void xapic_configure_for_legacy(uintptr_t apic_base)
     /* Mask stale LVT entries to prevent unexpected interrupts.
      * Only mask entries with Fixed, Lowest Priority, NMI, or ExtINT delivery
      * mode. Leave SMI, INIT, and reserved delivery modes untouched as firmware
-     * may rely on them (e.g. thermal management via SMI). */
+     * may rely on them (e.g. thermal management via SMI).
+     *
+     * The LAPIC timer is excluded. A masked timer was suspected of stranding a
+     * Windows XP x64 guest that reached its logon screen and then stopped with
+     * the bootstrap processor asleep in `sti; hlt` and an empty interrupt request
+     * register. That suspicion does not survive measurement: the timer already
+     * arrives masked from OVMF, so the write below was never what set the mask,
+     * and the same guest goes on to log in with the timer still masked.
+     *
+     * It is still right to stop writing it. CSMWrap is not the operating system,
+     * so the clock the OS inherits is the OS's to program, and a CSM that masks
+     * the one register the OS will use as its timer is making a decision that
+     * belongs to the OS. The state is reported rather than changed, so a run
+     * records what the OS inherited. */
     uint32_t lvt;
     lvt = *(volatile uint32_t *)(apic_base + XAPIC_LVT_TIMER_OFFSET);
-    if (lvt_should_mask(lvt))
-        *(volatile uint32_t *)(apic_base + XAPIC_LVT_TIMER_OFFSET) = lvt | LVT_MASK;
+    /* Report, do not change. The delivery mode and the count stay as firmware
+     * programmed them, and the OS reprograms the timer once it owns the machine.
+     * Inventing a frequency here would be a guess with no measurement behind it. */
+    printf("  xAPIC LVT_TIMER left as 0x%08x (masked=%d), as inherited from "
+           "firmware\n", lvt, !!(lvt & LVT_MASK));
     lvt = *(volatile uint32_t *)(apic_base + XAPIC_LVT_ERROR_OFFSET);
     if (lvt_should_mask(lvt))
         *(volatile uint32_t *)(apic_base + XAPIC_LVT_ERROR_OFFSET) = lvt | LVT_MASK;
