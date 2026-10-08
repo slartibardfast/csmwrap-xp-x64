@@ -13,6 +13,7 @@ struct csmwrap_config gConfig = {
     .serial_baud = 115200,
     .vgabios_path = {0},
     .iommu_disable = true,
+    .oprom = true,
     .verbose = false,
     .vga_specified = false,
     .vga_bus = 0,
@@ -341,6 +342,14 @@ static void config_apply(const char *key, const char *val)
             gConfig.vgabios_path[i] = (CHAR16)(unsigned char)val[i];
         gConfig.vgabios_path[i] = 0;
         printf("  vgabios = %s\n", val);
+    } else if (streq_nocase(key, "oprom")) {
+        bool v;
+        if (parse_bool(val, &v)) {
+            gConfig.oprom = v;
+            printf("  oprom = %s\n", v ? "true" : "false");
+        } else {
+            printf("  warning: invalid value for 'oprom': %s\n", val);
+        }
     } else if (streq_nocase(key, "iommu_disable")) {
         bool v;
         if (parse_bool(val, &v)) {

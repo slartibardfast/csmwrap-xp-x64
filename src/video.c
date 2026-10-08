@@ -815,6 +815,17 @@ EFI_STATUS csmwrap_video_init(struct csmwrap_priv *priv)
         return 0;
     }
 
+    /*
+     * oprom = false skips straight to SeaVGABIOS. On hosts where the card's
+     * legacy OpROM cannot POST (no legacy VGA resources assigned to it), the
+     * dispatch spins on an unclaimed IO port instead of returning an error,
+     * so the documented SeaVGABIOS fallback is unreachable without this key.
+     */
+    if (!gConfig.oprom) {
+        printf("Video: OpROM dispatch disabled by config; using SeaVGABIOS\n");
+        goto try_seavga;
+    }
+
     /* Try OpROM: user-specified GPU, or auto-select from all GPUs */
     status = csmwrap_video_oprom_init(priv);
     if (status == EFI_SUCCESS) {

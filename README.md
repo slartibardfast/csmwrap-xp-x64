@@ -103,6 +103,7 @@ printf '\x07\x00\x00\x00%s' "$(cat csmwrap.ini)" > /sys/firmware/efi/efivars/CSM
 | `serial_port` | hex/int | `0x3f8` | Serial I/O port address (COM1=`0x3f8`, COM2=`0x2f8`, COM3=`0x3e8`, COM4=`0x2e8`) |
 | `serial_baud` | int | `115200` | Serial baud rate |
 | `vgabios` | string | *(empty)* | Path to a custom VBIOS file on the ESP (e.g. `\EFI\CSMWrap\vgabios.bin`). When empty, the card's built-in OpROM is used, and, failing that, SeaVGABIOS is used. If vgabios is set to `cbfs` vgabios.bin will tried to be loaded from coreboot cbfs. If you set it to `cbfs:filename` you can use a custom cbfs filename. |
+| `oprom` | bool | `true` | Dispatch the selected card's legacy Option ROM for video. Set `false` to skip straight to SeaVGABIOS over the GOP framebuffer, for hosts where the card's legacy OpROM cannot POST (e.g. no legacy VGA resources assigned to it) and would hang rather than fail |
 | `iommu_disable` | bool | `true` | Disable IOMMUs (Intel VT-d / AMD-Vi) before legacy boot |
 | `verbose` | bool | `false` | Show debug output on screen via Flanterm |
 | `vga` | PCI address | *(empty)* | PCI address of the VGA card to use (e.g. `00:02.0`). Format: `BB:DD.F` (hex). When empty, the first available card is used |
