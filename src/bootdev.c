@@ -285,6 +285,20 @@ static int enumerate_block_devices(struct low_stub *low_stub,
             continue;
         }
 
+          /*
+           * An optical drive behind an IDE/SATA controller cannot be told apart
+           * by PCI class: the class code belongs to the controller function and
+           * reads class=01 subclass=01 for the disk and the CD alike. Its device
+           * path ends in MSG_ATAPI_DP with no MEDIA_CDROM_DP node on this stack,
+           * so without this the CD inherits the default BBS_HARDDISK type and
+           * never reaches the CMOS boot order SeaBIOS derives from the BBS.
+           * RemovableBlockMedia is per media and is the reliable signal.
+           */
+          if (dev_info.device_type == BBS_HARDDISK &&
+              block_io->Media != NULL && block_io->Media->RemovableMedia) {
+              dev_info.device_type = BBS_CDROM;
+          }
+
         bool is_boot_device = boot_info->valid && devices_match(&dev_info, boot_info);
         int priority = is_boot_device ? 0 : next_priority++;
 
