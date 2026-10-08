@@ -6,8 +6,12 @@
 /*
  * Boot device detection and BBS table building for CSMWrap
  *
- * This module detects which drive CSMWrap was booted from and creates
- * a BBS table that prioritizes that drive for SeaBIOS boot order.
+ * This module detects which drive CSMWrap was booted from and creates a BBS
+ * table that prioritizes that drive for SeaBIOS boot order. Two facts about
+ * that table shape it. SeaBIOS addresses it by slot rather than by PCI
+ * location, so entries are written where SeaBIOS will look for them; and a
+ * disk with no active partition cannot boot, so when that is the case the
+ * disk is stepped behind and the installer leads instead.
  */
 
 /*
@@ -58,8 +62,18 @@ static bool parse_device_path(EFI_DEVICE_PATH_PROTOCOL *device_path,
             case MSG_ATAPI_DP:
                 {
                     ATAPI_DEVICE_PATH *atapi = (ATAPI_DEVICE_PATH *)node;
-                    /* Check if this is a CD-ROM based on typical ATAPI usage */
-                    (void)atapi;  /* May use later for more specific detection */
+                    /*
+                     * UEFI has no separate ATA subtype: this one node describes
+                     * both an ATA disk and an ATAPI drive, and it is the only
+                     * place the IDE channel and the drive select are visible on
+                     * the UEFI side. SeaBIOS's CSM bridge does not look drives
+                     * up by PCI location, it indexes the BBS table as
+                     * 1 + channel * 2 + slave, so these two numbers decide
+                     * which slot a drive can be found in.
+                     */
+                    info->ata_channel = atapi->PrimarySecondary;
+                    info->ata_slave = atapi->SlaveMaster;
+                    info->has_ata_position = true;
                 }
                 break;
             case MSG_SCSI_DP:
@@ -181,26 +195,88 @@ static const char *device_type_str(uint16_t type)
 }
 
 /*
+ * Does this disk carry an operating system to boot?
+ *
+ * A disk with no active partition cannot boot, and SeaBIOS will waste the whole
+ * boot on it: its own decline test is the 0xAA55 signature at offset 0x1FE,
+ * which the partition table also depends on. Removing the signature would hide
+ * the partition holding CSMWrap from mkfs.vfat and from OVMF, which must find
+ * it to load CSMWrap at all, so the disk is demoted in the BBS instead.
+ *
+ * The test is the active-partition flag rather than "is the boot code empty"
+ * because it is the standard answer to this question and because it corrects
+ * itself: once an installer writes a real MBR the flag is set and the disk
+ * takes priority back.
+ *
+ * A read failure is reported as bootable, so a device that cannot be inspected
+ * keeps the existing behaviour rather than being silently demoted.
+ */
+static bool disk_carries_boot_os(EFI_BLOCK_IO_PROTOCOL *block_io)
+{
+    uint8_t sector[512];
+    EFI_STATUS status;
+    int i;
+
+    if (!block_io || !block_io->Media) {
+        return true;
+    }
+
+    status = block_io->ReadBlocks(block_io, block_io->Media->MediaId, 0,
+                                  sizeof(sector), sector);
+    if (EFI_ERROR(status)) {
+        printf("bootdev: sector 0 read failed (%d), treating disk as bootable\n",
+               (int)status);
+        return true;
+    }
+
+    if (sector[510] != 0x55 || sector[511] != 0xaa) {
+        printf("bootdev: sector 0 has no AA55 signature, not a partition table\n");
+        return false;
+    }
+
+    for (i = 0; i < 4; i++) {
+        const uint8_t *entry = &sector[0x1be + i * 16];
+
+        /* Active flag set and a non-zero partition type: an installed OS. */
+        if ((entry[0] & 0x80) && entry[4] != 0x00) {
+            printf("bootdev: partition %d is active and typed, disk is bootable\n",
+                   i + 1);
+            return true;
+        }
+    }
+
+    printf("bootdev: no active partition in sector 0, disk cannot boot\n");
+    return false;
+}
+
+/*
  * Add a BBS entry for a block device
  *
- * priority: 0 = highest (boot device), 1+ = lower priority
+ * index:    the slot the entry goes in. SeaBIOS does not look entries up by
+ *           PCI location for ATA drives: it indexes the table as
+ *           1 + channel * 2 + slave, with slot 0 reserved for the floppy
+ *           controller and slot 5 onward for PCI devices. An entry written
+ *           anywhere else is unreachable.
+ * priority: BBS priority, 0 being highest. BBS_DO_NOT_BOOT_FROM maps to no
+ *           priority at all and drops the entry back to SeaBIOS's own default,
+ *           which is how a drive is stepped behind rather than excluded.
  */
 static void add_bbs_entry(struct low_stub *low_stub,
                          const struct boot_device_info *info,
-                         int priority)
+                         size_t index,
+                         UINT16 priority)
 {
     BBS_TABLE *entry;
     char *desc;
-    size_t idx;
 
-    if (low_stub->bbs_entry_count >= MAX_BBS_ENTRIES) {
-        printf("bootdev: BBS table full, skipping device\n");
+    if (index >= MAX_BBS_ENTRIES) {
+        printf("bootdev: slot %zu is past the %d-entry table, skipping device\n",
+               index, MAX_BBS_ENTRIES);
         return;
     }
 
-    idx = low_stub->bbs_entry_count;
-    entry = &low_stub->bbs_entries[idx];
-    desc = low_stub->bbs_desc_strings[idx];
+    entry = &low_stub->bbs_entries[index];
+    desc = low_stub->bbs_desc_strings[index];
 
     memset(entry, 0, sizeof(*entry));
 
@@ -239,10 +315,28 @@ static void add_bbs_entry(struct low_stub *low_stub,
     entry->DescStringSegment = EFI_SEGMENT(desc_addr);
     entry->DescStringOffset = EFI_OFFSET(desc_addr);
 
-    printf("bootdev: BBS[%zu] %s pri=%d\n", idx, desc, entry->BootPriority);
+    printf("bootdev: BBS[%zu] %s pri=%u%s\n", index, desc, (unsigned)priority,
+           priority == BBS_DO_NOT_BOOT_FROM ? " (demoted)" : "");
 
-    low_stub->bbs_entry_count++;
+    /* Entries are addressed by slot, so the count has to cover the highest
+     * slot written rather than assume they were appended in order. */
+    if (index + 1 > low_stub->bbs_entry_count) {
+        low_stub->bbs_entry_count = index + 1;
+    }
 }
+
+/*
+ * Slot layout of the BBS table, as SeaBIOS addresses it. It does not look
+ * entries up by PCI location for ATA drives: in the CSM's SeaBIOS,
+ * csm_bootprio_ata() computes 1 + channel * 2 + slave, csm_bootprio_fdc()
+ * reads slot 0 and csm_bootprio_pci() scans from slot 5. Appending entries in
+ * enumeration order therefore does not describe the machine: with one disk and
+ * one CD sharing an IDE controller both landed in the first two slots and the
+ * CD's own slot was never written, so it inherited whatever was there.
+ */
+#define BBS_SLOT_FDC       0
+#define BBS_SLOT_ATA_BASE  1
+#define BBS_SLOT_PCI       5
 
 /*
  * Enumerate block I/O devices and build BBS entries
@@ -254,7 +348,10 @@ static int enumerate_block_devices(struct low_stub *low_stub,
     EFI_GUID block_io_guid = EFI_BLOCK_IO_PROTOCOL_GUID;
     EFI_HANDLE *handles = NULL;
     UINTN handle_count = 0;
-    int next_priority = 1;  /* Priority 0 reserved for boot device */
+    UINT16 next_priority = 1;  /* Priority 0 reserved for the boot target */
+    bool top_taken = false;
+    bool boot_disk_bootable = true;
+    size_t next_pci_slot = BBS_SLOT_PCI;
 
     /* Find all block I/O devices */
     status = gBS->LocateHandleBuffer(ByProtocol, &block_io_guid, NULL,
@@ -266,9 +363,53 @@ static int enumerate_block_devices(struct low_stub *low_stub,
 
     printf("bootdev: Found %lu block devices\n", (unsigned long)handle_count);
 
+    /*
+     * Whether the disk CSMWrap was loaded from can boot has to be settled before
+     * anything is written: enumeration can reach the CD before that disk, and
+     * the priority order must be decided up front.
+     */
+    if (boot_info->valid) {
+        for (UINTN i = 0; i < handle_count; i++) {
+            EFI_BLOCK_IO_PROTOCOL *block_io;
+            struct boot_device_info dev_info;
+
+            if (EFI_ERROR(gBS->HandleProtocol(handles[i], &block_io_guid,
+                                              (void **)&block_io))) {
+                continue;
+            }
+            if (block_io->Media && block_io->Media->LogicalPartition) {
+                continue;
+            }
+            if (!get_pci_location(handles[i], &dev_info)) {
+                continue;
+            }
+            if (!devices_match(&dev_info, boot_info)) {
+                continue;
+            }
+            boot_disk_bootable = disk_carries_boot_os(block_io);
+            break;
+        }
+    }
+
+    /*
+     * The floppy slot is read by csm_bootprio_fdc() whether or not an entry is
+     * written, and left at zero it would tie with the CD for first place. The
+     * medium CSMWrap booted from is the disk, not the floppy, so send any
+     * floppy to the back of the order rather than let it compete. It stays
+     * reachable as a last resort.
+     */
+    low_stub->bbs_entries[BBS_SLOT_FDC].BootPriority = BBS_UNPRIORITIZED_ENTRY;
+    if (low_stub->bbs_entry_count < BBS_SLOT_FDC + 1) {
+        low_stub->bbs_entry_count = BBS_SLOT_FDC + 1;
+    }
+    printf("bootdev: BBS[%d] floppy demoted to unprioritised\n", BBS_SLOT_FDC);
+
     for (UINTN i = 0; i < handle_count; i++) {
         EFI_BLOCK_IO_PROTOCOL *block_io;
         struct boot_device_info dev_info;
+        bool is_boot_device;
+        size_t slot;
+        UINT16 priority;
 
         status = gBS->HandleProtocol(handles[i], &block_io_guid, (void **)&block_io);
         if (EFI_ERROR(status)) {
@@ -290,19 +431,56 @@ static int enumerate_block_devices(struct low_stub *low_stub,
            * by PCI class: the class code belongs to the controller function and
            * reads class=01 subclass=01 for the disk and the CD alike. Its device
            * path ends in MSG_ATAPI_DP with no MEDIA_CDROM_DP node on this stack,
-           * so without this the CD inherits the default BBS_HARDDISK type and
-           * never reaches the CMOS boot order SeaBIOS derives from the BBS.
-           * RemovableBlockMedia is per media and is the reliable signal.
+           * so without this the CD inherits the default BBS_HARDDISK type.
+           * RemovableBlockMedia is per media and is the reliable signal. Note
+           * that the type does not reach SeaBIOS's ATA lookup, which reads the
+           * slot and the priority and never looks at DeviceType.
            */
           if (dev_info.device_type == BBS_HARDDISK &&
               block_io->Media != NULL && block_io->Media->RemovableMedia) {
               dev_info.device_type = BBS_CDROM;
           }
 
-        bool is_boot_device = boot_info->valid && devices_match(&dev_info, boot_info);
-        int priority = is_boot_device ? 0 : next_priority++;
+        /* Slot: where SeaBIOS will compute this drive's index. */
+        if (dev_info.has_ata_position &&
+            dev_info.ata_channel < 2 && dev_info.ata_slave < 2) {
+            slot = BBS_SLOT_ATA_BASE + dev_info.ata_channel * 2 + dev_info.ata_slave;
+        } else {
+            slot = next_pci_slot++;
+        }
 
-        add_bbs_entry(low_stub, &dev_info, priority);
+        /*
+         * devices_match() compares PCI location alone, and both drives of one
+         * IDE controller share a BDF, so on its own it matches the CD as well as
+         * the disk. Requiring the type as well is what makes "the device CSMWrap
+         * booted from" name one drive rather than two.
+         */
+        is_boot_device = boot_info->valid &&
+                         dev_info.device_type == boot_info->device_type &&
+                         devices_match(&dev_info, boot_info);
+
+        if (is_boot_device && boot_disk_bootable) {
+            priority = 0;
+        } else if (is_boot_device) {
+            /* Nothing to boot here: step behind, do not exclude outright. */
+            priority = BBS_DO_NOT_BOOT_FROM;
+        } else if (!boot_disk_bootable && dev_info.device_type == BBS_CDROM) {
+            /* Nothing on the boot disk, so the installer leads. */
+            priority = 0;
+        } else {
+            priority = next_priority++;
+        }
+
+        /* Exactly one entry may hold priority 0. */
+        if (priority == 0) {
+            if (top_taken) {
+                priority = next_priority++;
+            } else {
+                top_taken = true;
+            }
+        }
+
+        add_bbs_entry(low_stub, &dev_info, slot, priority);
     }
 
     gBS->FreePool(handles);

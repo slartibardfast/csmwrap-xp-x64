@@ -25,6 +25,16 @@ struct boot_device_info {
     uint16_t device_type;       /* BBS_HARDDISK, BBS_CDROM, etc. */
     bool is_usb;
     uint16_t sata_port;         /* SATA port number if applicable */
+
+    /*
+     * IDE channel and drive select, from the MSG_ATAPI_DP node (UEFI has no
+     * separate ATA subtype). SeaBIOS's CSM bridge indexes the BBS table
+     * positionally as 1 + channel * 2 + slave, so without these a drive
+     * cannot be placed in the slot SeaBIOS will look in.
+     */
+    uint8_t ata_channel;
+    uint8_t ata_slave;
+    bool has_ata_position;
 };
 
 /*
