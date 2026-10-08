@@ -3,3 +3,12 @@ CONFIG_CSM=y
 # CONFIG_VGAHOOKS is not set
 # CONFIG_TCGBIOS is not set
 CONFIG_VGA_COREBOOT=y
+
+# Serial debug for the CSM phase. Without it the CSM's SeaBIOS is mute: its only
+# console would be the video device, and on a host whose passed-through card has
+# no UEFI payload (no GOP) and no legacy VGA resources (so no legacy OpROM either)
+# there is no console at all, and the phase fails silently. Debug output goes to
+# 0x3f8, the same port CSMWrap uses before the handoff, so one log holds both.
+CONFIG_DEBUG_LEVEL=1
+CONFIG_DEBUG_SERIAL=y
+CONFIG_DEBUG_SERIAL_PORT=0x3f8
