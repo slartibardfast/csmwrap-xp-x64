@@ -786,6 +786,22 @@ EFI_STATUS csmwrap_video_init(struct csmwrap_priv *priv)
 {
     EFI_STATUS status;
 
+    /*
+     * oprom = false means "do not dispatch the card's Option ROM, use
+     * SeaVGABIOS". That decision has to be taken before the GOP lookup below,
+     * because SeaVGABIOS does not need a GOP: it renders into the framebuffer of
+     * whichever device is VGA class. Requiring a GOP first made the key
+     * unreachable on any card without one, which is the very host the key exists
+     * for, since a card whose OpROM cannot POST is often a card with a legacy-only
+     * ROM. On such a host this returned EFI_UNSUPPORTED before reaching the gate
+     * below, so the key silently did nothing and the Option ROM was dispatched
+     * anyway, hanging the CSM handoff.
+     */
+    if (!gConfig.oprom) {
+        printf("Video: OpROM dispatch disabled by config; using SeaVGABIOS\n");
+        goto try_seavga;
+    }
+
     /* Find GOP if not already found by early init */
     if (!priv->gop) {
         status = FindGop(priv);
@@ -813,17 +829,6 @@ EFI_STATUS csmwrap_video_init(struct csmwrap_priv *priv)
             FindVgaGop(priv);
         priv->video_type = CSMWRAP_VIDEO_OPROM;
         return 0;
-    }
-
-    /*
-     * oprom = false skips straight to SeaVGABIOS. On hosts where the card's
-     * legacy OpROM cannot POST (no legacy VGA resources assigned to it), the
-     * dispatch spins on an unclaimed IO port instead of returning an error,
-     * so the documented SeaVGABIOS fallback is unreachable without this key.
-     */
-    if (!gConfig.oprom) {
-        printf("Video: OpROM dispatch disabled by config; using SeaVGABIOS\n");
-        goto try_seavga;
     }
 
     /* Try OpROM: user-specified GPU, or auto-select from all GPUs */
