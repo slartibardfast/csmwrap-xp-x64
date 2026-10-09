@@ -109,6 +109,31 @@ static bool parse_uint32(const char *val, uint32_t *out)
     return true;
 }
 
+/*
+ * Parse a "WIDTHxHEIGHT" resolution, e.g. "1024x768".
+ *
+ * parse_uint32 only succeeds when the whole string is digits, so each half is
+ * copied out and terminated before parsing rather than parsed in place.
+ */
+static bool parse_resolution(const char *val, uint32_t *w, uint32_t *h)
+{
+    char buf[11];  /* widest u32 is 10 digits plus NUL */
+    size_t n = 0;
+
+    while (val[n] && val[n] != 'x' && val[n] != 'X')
+        n++;
+    if (val[n] == '\0' || n == 0 || n >= sizeof(buf))
+        return false;
+
+    for (size_t i = 0; i < n; i++)
+        buf[i] = val[i];
+    buf[n] = '\0';
+    if (!parse_uint32(buf, w) || *w == 0)
+        return false;
+
+    return parse_uint32(&val[n + 1], h) && *h > 0;
+}
+
 static bool parse_hex_byte(const char *s, size_t len, uint32_t *out)
 {
     if (len == 0)
@@ -376,6 +401,15 @@ static void config_apply(const char *key, const char *val)
             printf("  vga = %02x:%02x.%x\n", b, d, f);
         } else {
             printf("  warning: invalid PCI address for 'vga': %s (expected BB:DD.F)\n", val);
+        }
+    } else if (streq_nocase(key, "gop_resolution")) {
+        uint32_t w, h;
+        if (parse_resolution(val, &w, &h)) {
+            gConfig.gop_width = w;
+            gConfig.gop_height = h;
+            printf("  gop_resolution = %ux%u\n", w, h);
+        } else {
+            printf("  warning: invalid value for 'gop_resolution': %s (expected WxH, e.g. 1024x768)\n", val);
         }
     } else if (streq_nocase(key, "system_thread")) {
         uint32_t v;

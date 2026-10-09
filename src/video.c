@@ -115,19 +115,79 @@ static EFI_STATUS FindGop(struct csmwrap_priv *priv)
         }
 
         /* Prefer the firmware's current mode to avoid blanking and resizing
-         * the user's display. Only enumerate-and-SetMode if it isn't usable. */
+         * the user's display. Only enumerate-and-SetMode if it isn't usable,
+         * or if the user asked for a resolution this mode does not reach. */
         bool found = gop_mode_usable(Gop);
+
+        if (found && gConfig.gop_width != 0) {
+            EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *cur = Gop->Mode->Info;
+            if (cur->HorizontalResolution < gConfig.gop_width
+                || cur->VerticalResolution < gConfig.gop_height) {
+                printf("GOP mode %u is %ux%u, below the requested %ux%u\n",
+                       Gop->Mode->Mode,
+                       cur->HorizontalResolution, cur->VerticalResolution,
+                       gConfig.gop_width, gConfig.gop_height);
+                found = false;
+            }
+        }
+
         if (!found) {
             UINTN maxMode = Gop->Mode->MaxMode;
+            UINTN best = (UINTN)-1;
+            UINTN bestArea = 0;
+
+            /*
+             * Take the largest usable mode, not the first. The mode numbers
+             * are in no useful order and the smallest one is usually 640x480,
+             * so stopping at the first hit would miss the mode the user asked
+             * for. When no minimum was requested, largest still beats a
+             * guessed default because SeaVGABIOS can only advertise the VESA
+             * modes that fit the framebuffer it is handed.
+             */
             for (UINTN mode = 0; mode < maxMode; mode++) {
                 Status = Gop->SetMode(Gop, mode);
                 if (EFI_ERROR(Status))
                     continue;
-                if (gop_mode_usable(Gop)) {
-                    found = true;
-                    break;
+                if (!gop_mode_usable(Gop))
+                    continue;
+
+                EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = Gop->Mode->Info;
+                if (gConfig.gop_width != 0
+                    && (mi->HorizontalResolution < gConfig.gop_width
+                        || mi->VerticalResolution < gConfig.gop_height))
+                    continue;
+
+                UINTN area = (UINTN)mi->HorizontalResolution
+                           * mi->VerticalResolution;
+                if (best == (UINTN)-1 || area > bestArea) {
+                    best = mode;
+                    bestArea = area;
                 }
             }
+
+            if (best == (UINTN)-1) {
+                /* Name the modes that were on offer: a bare "not found" would
+                 * leave the reader to guess whether the card lacks the mode or
+                 * the key was mistyped. */
+                printf("No GOP mode met the request; offered:\n");
+                for (UINTN mode = 0; mode < maxMode; mode++) {
+                    Status = Gop->SetMode(Gop, mode);
+                    if (EFI_ERROR(Status))
+                        continue;
+                    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = Gop->Mode->Info;
+                    printf("  mode %u: %ux%u\n", mode,
+                           mi->HorizontalResolution, mi->VerticalResolution);
+                }
+                continue;
+            }
+
+            Status = Gop->SetMode(Gop, best);
+            if (EFI_ERROR(Status))
+                continue;
+            printf("Selected GOP mode %u (%ux%u)\n", best,
+                   Gop->Mode->Info->HorizontalResolution,
+                   Gop->Mode->Info->VerticalResolution);
+            found = true;
         }
 
         if (!found) {

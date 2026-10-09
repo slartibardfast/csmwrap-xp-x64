@@ -554,6 +554,39 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
     calibrate_tsc();
 
+    /*
+     * Locate our own directory and load csmwrap.ini before the video init.
+     *
+     * The GOP mode is chosen inside csmwrap_video_early_init(), so any key that
+     * constrains the mode (gop_resolution) has to be known by then. Loading the
+     * config afterwards left gop_resolution unset at the point it is read, and
+     * the key silently did nothing.
+     *
+     * The order looks backwards - config_load() prints, and printing normally
+     * needs the framebuffer this call sets up - but it does not: printf() only
+     * writes to the screen when flanterm_ctx is non-NULL, so before the video
+     * init its output goes to the serial port alone. Nothing is lost.
+     */
+    EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
+    if (gBS->HandleProtocol(ImageHandle, &loaded_image_guid, (void **)&loaded_image) != EFI_SUCCESS) {
+        loaded_image = NULL;
+    }
+
+    EFI_GUID sfs_protocol_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs_protocol = NULL;
+    if (loaded_image == NULL || gBS->HandleProtocol(loaded_image->DeviceHandle, &sfs_protocol_guid, (void **)&sfs_protocol) != EFI_SUCCESS) {
+        sfs_protocol = NULL;
+    }
+
+    EFI_FILE_PROTOCOL *sfs_dir = NULL;
+    if (sfs_protocol == NULL || sfs_protocol->OpenVolume(sfs_protocol, &sfs_dir) != EFI_SUCCESS) {
+        sfs_dir = NULL;
+    }
+
+    /* Load configuration from csmwrap.ini next to our executable or from NVRAM */
+    config_load(sfs_dir, loaded_image ? loaded_image->FilePath : NULL);
+
     csmwrap_video_early_init(&priv);
 
     /* Initialise Flanterm (output gated on verbose; panics always show) */
@@ -588,25 +621,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
         panic("Failed to query current time\n");
     }
 
-    EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
-    EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
-    if (gBS->HandleProtocol(ImageHandle, &loaded_image_guid, (void **)&loaded_image) != EFI_SUCCESS) {
-        loaded_image = NULL;
-    }
-
-    EFI_GUID sfs_protocol_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs_protocol = NULL;
-    if (loaded_image == NULL || gBS->HandleProtocol(loaded_image->DeviceHandle, &sfs_protocol_guid, (void **)&sfs_protocol) != EFI_SUCCESS) {
-        sfs_protocol = NULL;
-    }
-
-    EFI_FILE_PROTOCOL *sfs_dir = NULL;
-    if (sfs_protocol == NULL || sfs_protocol->OpenVolume(sfs_protocol, &sfs_dir) != EFI_SUCCESS) {
-        sfs_dir = NULL;
-    }
-
-    /* Load configuration from csmwrap.ini next to our executable or from NVRAM */
-    config_load(sfs_dir, loaded_image ? loaded_image->FilePath : NULL);
+    /* sfs_dir, loaded_image and the config were set up before the video init,
+     * because the GOP mode is chosen there and gop_resolution must be known by
+     * then. See the comment above csmwrap_video_early_init(). */
 
     if (simple_wcscmp(gConfig.vgabios_path, L"cbfs") == 0) {
         vgabios_from_cbfs = TRUE;

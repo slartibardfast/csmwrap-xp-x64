@@ -27,6 +27,18 @@ struct csmwrap_config {
     uint8_t vga_device;
     uint8_t vga_function;
 
+    /*
+     * Minimum framebuffer resolution to ask the GOP for. Zero on either means
+     * "keep whatever mode the firmware picked", which is the default.
+     *
+     * SeaVGABIOS can only advertise the VESA modes that fit inside the
+     * framebuffer it is given, so the resolution OVMF happens to choose bounds
+     * what the guest OS can select. Windows Setup and NTLDR look for 800x600 or
+     * 1024x768, so a small firmware default can leave them with nothing.
+     */
+    uint32_t gop_width;
+    uint32_t gop_height;
+
     bool system_thread_specified;
     uint32_t system_thread_apic_id;
 
